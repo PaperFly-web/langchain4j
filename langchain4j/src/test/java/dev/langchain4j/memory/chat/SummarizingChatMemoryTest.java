@@ -3,6 +3,12 @@ package dev.langchain4j.memory.chat;
 import static dev.langchain4j.data.message.AiMessage.aiMessage;
 import static dev.langchain4j.data.message.SystemMessage.systemMessage;
 import static dev.langchain4j.data.message.UserMessage.userMessage;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
@@ -11,19 +17,21 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.model.TokenCountEstimator;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import java.util.List;
+import java.util.function.Function;
 import java.util.stream.Stream;
-import dev.langchain4j.model.openai.OpenAiChatModelName;
 import org.assertj.core.api.WithAssertions;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-@EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
 public class SummarizingChatMemoryTest implements WithAssertions {
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void id(ChatModel chatModel) {
@@ -46,6 +54,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         }
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void store_and_clear(ChatModel chatModel) {
@@ -66,10 +75,8 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         chatMemory.add(whoAreYou);
         chatMemory.add(lisi);
 
-
         // Verify that the first three messages are still retained
-        assertThat(chatMemory.messages())
-                .containsExactly(hello, world, whoAreYou, lisi);
+        assertThat(chatMemory.messages()).containsExactly(hello, world, whoAreYou, lisi);
         // Add a fifth message; summarization logic may replace or summarize older messages instead of appending
         // directly
         UserMessage iAmWangwu = userMessage("I am wangwu");
@@ -78,8 +85,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         // verify the message list after summarization
         List<ChatMessage> messagesAfterSummarize = chatMemory.messages();
         // Verify that the first message is not the hello (it should have been summarized or excluded)
-        assertThat(messagesAfterSummarize.get(0))
-                .isNotEqualTo(hello);
+        assertThat(messagesAfterSummarize.get(0)).isNotEqualTo(hello);
 
         // Clear the memory
         chatMemory.clear();
@@ -88,6 +94,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(chatMemory.messages()).isEmpty();
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_summarize_messages_when_threshold_exceeded(ChatModel chatModel) {
@@ -133,6 +140,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(chatMemory.messages()).isEmpty();
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_not_evict_system_message_from_chat_memory(ChatModel chatModel) {
@@ -188,6 +196,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(messages.subList(2, 4)).containsExactly(m3, m4);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_keep_only_the_latest_system_message_in_chat_memory(ChatModel chatModel) {
@@ -235,15 +244,13 @@ public class SummarizingChatMemoryTest implements WithAssertions {
 
         // The first message should be a summary message
         ChatMessage summary = msgs.get(0);
-        assertThat(summary)
-                .isNotEqualTo(sys1)
-                .isNotEqualTo(a1)
-                .isNotEqualTo(u1);
+        assertThat(summary).isNotEqualTo(sys1).isNotEqualTo(a1).isNotEqualTo(u1);
 
         // The last two messages should be the most recent original messages
         assertThat(msgs.subList(2, 4)).containsExactly(u2, a2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_not_add_the_same_system_message_to_chat_memory_if_it_is_already_there(ChatModel chatModel) {
@@ -290,15 +297,13 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         ChatMessage summary = msgs.get(1);
         ChatMessage sysMsg = msgs.get(0);
         assertThat(sysMsg).isEqualTo(sys);
-        assertThat(summary)
-                .isNotEqualTo(sys)
-                .isNotEqualTo(u1)
-                .isNotEqualTo(a1);
+        assertThat(summary).isNotEqualTo(sys).isNotEqualTo(u1).isNotEqualTo(a1);
 
         // The last two messages are the most recent original messages
         assertThat(msgs.subList(2, 4)).containsExactly(u2, a2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_evict_orphan_ToolExecutionResultMessage_when_evicting_AiMessage_with_ToolExecutionRequest(
@@ -353,6 +358,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(finalMsgs.subList(1, 2)).containsExactly(ai2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void
@@ -418,6 +424,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(finalMsgs.get(finalMsgs.size() - 1)).isEqualTo(ai2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void
@@ -479,6 +486,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(latestMsgs.get(latestMsgs.size() - 1)).isEqualTo(ai2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_evict_multiple_orphan_ToolExecutionResultMessages_when_evicting_AiMessage_with_ToolExecutionRequests(
@@ -541,6 +549,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(finalMsgs.get(1)).isEqualTo(ai2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void
@@ -612,6 +621,7 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(finalMsgs.get(finalMsgs.size() - 1)).isEqualTo(ai2);
     }
 
+    @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
     @ParameterizedTest
     @MethodSource("models")
     void should_handle_dynamic_maxMessages_and_maxMessagesToSummarize(ChatModel chatModel) {
@@ -691,12 +701,246 @@ public class SummarizingChatMemoryTest implements WithAssertions {
         assertThat(msgsAfterAi4.get(msgsAfterAi4.size() - 1)).isEqualTo(ai4);
     }
 
+    // ============ TOKEN-BASED MODE TESTS ============
+
+    @Test
+    void should_trigger_summarization_when_token_threshold_exceeded() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        // First call: 100 tokens, second: 200, etc.
+        when(tokenCountEstimator.estimateTokenCountInMessages(any()))
+                .thenReturn(100, 200, 300, 400, 500, 200); // Last one after summarization
+        when(tokenCountEstimator.estimateTokenCountInMessage(any())).thenReturn(100);
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+        when(mockSummarizer.apply(anyList())).thenReturn(userMessage("Summary of conversation"));
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(400, tokenCountEstimator)
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        // When: Add messages until threshold exceeded
+        memory.add(userMessage("msg1"));
+        memory.add(aiMessage("response1"));
+        memory.add(userMessage("msg2"));
+        memory.add(aiMessage("response2"));
+        memory.add(userMessage("msg3")); // This should trigger summarization
+
+        // Then
+        verify(mockSummarizer).apply(anyList());
+    }
+
+    @Test
+    void should_not_trigger_summarization_when_under_token_threshold() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any())).thenReturn(100);
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(1000, tokenCountEstimator)
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        // When
+        memory.add(userMessage("short message"));
+
+        // Then
+        verify(mockSummarizer, never()).apply(anyList());
+    }
+
+    @Test
+    void should_preserve_system_message_during_token_based_summarization() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any())).thenReturn(100, 200, 300, 400, 500, 200);
+        when(tokenCountEstimator.estimateTokenCountInMessage(any())).thenReturn(100);
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+        when(mockSummarizer.apply(anyList())).thenReturn(userMessage("Summary"));
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(400, tokenCountEstimator)
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        SystemMessage sysMsg = systemMessage("You are a helpful assistant");
+        memory.add(sysMsg);
+        memory.add(userMessage("Hello"));
+        memory.add(aiMessage("Hi!"));
+        memory.add(userMessage("Question"));
+        memory.add(aiMessage("Answer")); // Should trigger summarization
+
+        // Then: System message should be preserved
+        List<ChatMessage> messages = memory.messages();
+        assertThat(messages.get(0)).isEqualTo(sysMsg);
+    }
+
+    @Test
+    void should_throw_when_token_mode_without_tokenizer() {
+        assertThatThrownBy(() -> SummarizingChatMemory.builder()
+                        .maxTokens(1000)
+                        // Missing: .tokenCountEstimator(...)
+                        .generateSummaryFunction(msgs -> userMessage("summary"))
+                        .build())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("TokenCountEstimator");
+    }
+
+    @Test
+    void should_throw_when_both_modes_configured() {
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+
+        assertThatThrownBy(() -> SummarizingChatMemory.builder()
+                        .maxMessages(10)
+                        .maxTokens(1000, tokenCountEstimator)
+                        .generateSummaryFunction(msgs -> userMessage("summary"))
+                        .build())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mutually exclusive");
+    }
+
+    @Test
+    void should_throw_when_no_mode_configured() {
+        assertThatThrownBy(() -> SummarizingChatMemory.builder()
+                        .generateSummaryFunction(msgs -> userMessage("summary"))
+                        .build())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must be configured");
+    }
+
+    @Test
+    void should_support_dynamic_token_threshold() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any())).thenReturn(100);
+
+        int[] dynamicThreshold = {1000}; // Using array to allow modification in lambda
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .dynamicMaxTokens(id -> dynamicThreshold[0])
+                .tokenCountEstimator(tokenCountEstimator)
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        // When
+        memory.add(userMessage("message"));
+
+        // Then: No summarization because under threshold
+        verify(mockSummarizer, never()).apply(anyList());
+
+        // Change threshold dynamically
+        dynamicThreshold[0] = 50;
+
+        // Token count is still 100, but now exceeds threshold of 50
+        when(tokenCountEstimator.estimateTokenCountInMessages(any()))
+                .thenReturn(100, 50); // over limit, then after summarization
+        when(tokenCountEstimator.estimateTokenCountInMessage(any())).thenReturn(50);
+        when(mockSummarizer.apply(anyList())).thenReturn(userMessage("Summary"));
+
+        memory.add(userMessage("another message")); // Should trigger summarization now
+
+        verify(mockSummarizer).apply(anyList());
+    }
+
+    @Test
+    void should_evict_orphan_tool_messages_in_token_mode() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any())).thenReturn(100, 200, 300, 400, 500, 200);
+        when(tokenCountEstimator.estimateTokenCountInMessage(any())).thenReturn(100);
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+        when(mockSummarizer.apply(anyList())).thenReturn(userMessage("Summary"));
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(400, tokenCountEstimator)
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        // Add user message
+        memory.add(userMessage("Calculate 2+2"));
+
+        // Add AI message with tool request
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("1")
+                .name("calculator")
+                .arguments("{ \"a\": 2, \"b\": 2 }")
+                .build();
+        memory.add(AiMessage.from(request));
+
+        // Add tool result
+        memory.add(ToolExecutionResultMessage.from(request, "4"));
+
+        // Add more messages to trigger summarization
+        memory.add(aiMessage("The result is 4"));
+        memory.add(userMessage("Thanks!")); // Should trigger summarization
+
+        // Then: Orphan tool messages should be included in summarization
+        verify(mockSummarizer).apply(anyList());
+    }
+
+    @Test
+    void should_handle_empty_memory_in_token_mode() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any())).thenReturn(0);
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(1000, tokenCountEstimator)
+                .generateSummaryFunction(msgs -> userMessage("summary"))
+                .build();
+
+        // Then
+        assertThat(memory.messages()).isEmpty();
+        memory.clear(); // Should not throw
+        assertThat(memory.messages()).isEmpty();
+    }
+
+    @Test
+    void should_use_custom_max_tokens_to_summarize() {
+        // Given
+        TokenCountEstimator tokenCountEstimator = mock(TokenCountEstimator.class);
+        when(tokenCountEstimator.estimateTokenCountInMessages(any()))
+                .thenReturn(500, 200); // over limit, then after summarization
+        when(tokenCountEstimator.estimateTokenCountInMessage(any())).thenReturn(100);
+
+        @SuppressWarnings("unchecked")
+        Function<List<ChatMessage>, UserMessage> mockSummarizer = mock(Function.class);
+        when(mockSummarizer.apply(anyList())).thenReturn(userMessage("Summary"));
+
+        ChatMemory memory = SummarizingChatMemory.builder()
+                .maxTokens(400, tokenCountEstimator)
+                .maxTokensToSummarize(200) // Custom: summarize 200 tokens worth
+                .generateSummaryFunction(mockSummarizer)
+                .build();
+
+        // When
+        memory.add(userMessage("message1"));
+        memory.add(aiMessage("response1"));
+        memory.add(userMessage("message2"));
+        memory.add(aiMessage("response2"));
+        memory.add(userMessage("message3")); // Triggers summarization
+
+        // Then
+        verify(mockSummarizer).apply(anyList());
+    }
+
     static Stream<Arguments> models() {
         return Stream.of(Arguments.of(OpenAiChatModel.builder()
                 .baseUrl(System.getenv("OPENAI_BASE_URL"))
                 .apiKey(System.getenv("OPENAI_API_KEY"))
-//                .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
-//                .modelName(OpenAiChatModelName.GPT_4_O_MINI)
+                //                .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
+                //                .modelName(OpenAiChatModelName.GPT_4_O_MINI)
                 .modelName("deepseek-chat")
                 .logRequests(true)
                 .logResponses(true)

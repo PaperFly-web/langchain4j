@@ -9,6 +9,7 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.model.TokenCountEstimator;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.service.memory.ChatMemoryService;
@@ -21,17 +22,25 @@ import java.util.function.Function;
 
 /**
  * A chat memory implementation that automatically summarizes conversation history
- * when the number of messages exceeds a configurable limit.
+ * when a configurable limit is exceeded.
+ *
+ * <p>This class supports two mutually exclusive triggering modes:
+ * <ul>
+ *     <li><b>Message-count mode</b>: Summarization is triggered when the number of messages
+ *         exceeds {@code maxMessages}. This is the original behavior.</li>
+ *     <li><b>Token-based mode</b>: Summarization is triggered when the total token count
+ *         exceeds {@code maxTokens}. This requires a {@link TokenCountEstimator}.</li>
+ * </ul>
  *
  * <p>This class behaves similarly to {@link MessageWindowChatMemory} but adds automatic
  * summarization capabilities through a customizable <b>summary generation function</b>.
  *
  * <p>Key features:
  * <ul>
- *     <li>Supports both static and dynamic configuration of <b>maxMessages</b> —
- *         the maximum number of messages retained before triggering summarization.</li>
- *     <li>Supports both static and dynamic configuration of <b>maxMessagesToSummarize</b> —
- *         the number of messages to remove and summarize once the limit is exceeded.</li>
+ *     <li>Supports both static and dynamic configuration of <b>maxMessages</b> or <b>maxTokens</b> —
+ *         the threshold before triggering summarization.</li>
+ *     <li>Supports both static and dynamic configuration of <b>maxMessagesToSummarize</b> or
+ *         <b>maxTokensToSummarize</b> — the amount to remove and summarize once the limit is exceeded.</li>
  *     <li>Supports dynamic generation of <b>system prompts</b> per memory ID,
  *         allowing context-specific summarization instructions.</li>
  *     <li>Automatically evicts orphaned {@link ToolExecutionResultMessage}s
@@ -43,23 +52,20 @@ import java.util.function.Function;
  *         <b>default summary function</b> </li>
  * </ul>
  *
- * <p>Usage notes:
- * <ul>
- *     <li>Messages are summarized only when their count exceeds <b>maxMessages</b>.</li>
- *     <li>The number of messages summarized each time is determined by
- *         <b>maxMessagesToSummarize</b>, and the generated summary is added back into memory.</li>
- *     <li>You can provide your own summary generation function or use the default one,
- *         which only requires a {@link ChatModel} instance.</li>
- *     <li>Dynamic configuration functions allow real-time adjustment of
- *         maxMessages, maxMessagesToSummarize, and system prompts for different memory IDs.</li>
- * </ul>
- *
- * <p>Example usage:
+ * <p>Example usage (message-count mode):
  * <pre>{@code
  * SummarizingChatMemory memory = SummarizingChatMemory.builder()
- *     .defaultGenerateSummaryFunction(chatModel) // use default summarization with a ChatModel
+ *     .defaultGenerateSummaryFunction(chatModel)
  *     .maxMessages(10)
  *     .maxMessagesToSummarize(3)
+ *     .build();
+ * }</pre>
+ *
+ * <p>Example usage (token-based mode):
+ * <pre>{@code
+ * SummarizingChatMemory memory = SummarizingChatMemory.builder()
+ *     .defaultGenerateSummaryFunction(chatModel)
+ *     .maxTokens(4000, tokenCountEstimator)
  *     .build();
  * }</pre>
  *
@@ -67,28 +73,62 @@ import java.util.function.Function;
  */
 public class SummarizingChatMemory implements ChatMemory {
 
+    /**
+     * Defines the triggering mode for summarization.
+     */
+    private enum TriggerMode {
+        MESSAGE_COUNT,
+        TOKEN_BASED
+    }
+
     private final Object id;
     private final ChatMemoryStore store;
+    private final TriggerMode triggerMode;
 
+    // Message-count mode fields
     private final Function<Object, Integer> maxMessagesFunction;
     private final Function<Object, Integer> maxMessagesToSummarizeFunction;
+
+    // Token-based mode fields
+    private final Function<Object, Integer> maxTokensFunction;
+    private final Function<Object, Integer> maxTokensToSummarizeFunction;
+    private final TokenCountEstimator tokenCountEstimator;
+
     private final Function<List<ChatMessage>, UserMessage> generateSummaryFunction;
 
     private SummarizingChatMemory(Builder builder) {
         this.id = ensureNotNull(builder.id, "id");
         this.store = ensureNotNull(builder.getStore(), "store");
-
-        this.maxMessagesFunction = ensureNotNull(builder.maxMessagesFunction, "maxMessagesFunction");
-        this.maxMessagesToSummarizeFunction =
-                ensureNotNull(builder.maxMessagesToSummarizeFunction, "maxMessagesToSummarizeFunction");
         this.generateSummaryFunction = ensureNotNull(builder.generateSummaryFunction, "generateSummaryFunction");
 
-        // Validate configuration once on build
-        int max = maxMessagesFunction.apply(id);
-        int maxMessagesToSummarize = maxMessagesToSummarizeFunction.apply(id);
-        ensureGreaterThanZero(max, "maxMessages");
-        ensureGreaterThanZero(maxMessagesToSummarize - 1, "maxMessagesToSummarize -1");
-        ensureGreaterThanZero(max - maxMessagesToSummarize, "maxMessages - maxMessagesToSummarize");
+        // Determine trigger mode
+        this.triggerMode = builder.determineTriggerMode();
+
+        if (triggerMode == TriggerMode.MESSAGE_COUNT) {
+            this.maxMessagesFunction = ensureNotNull(builder.maxMessagesFunction, "maxMessagesFunction");
+            this.maxMessagesToSummarizeFunction =
+                    ensureNotNull(builder.maxMessagesToSummarizeFunction, "maxMessagesToSummarizeFunction");
+            this.maxTokensFunction = null;
+            this.maxTokensToSummarizeFunction = null;
+            this.tokenCountEstimator = null;
+
+            // Validate message-count configuration once on build
+            int max = maxMessagesFunction.apply(id);
+            int maxMessagesToSummarize = maxMessagesToSummarizeFunction.apply(id);
+            ensureGreaterThanZero(max, "maxMessages");
+            ensureGreaterThanZero(maxMessagesToSummarize - 1, "maxMessagesToSummarize -1");
+            ensureGreaterThanZero(max - maxMessagesToSummarize, "maxMessages - maxMessagesToSummarize");
+        } else {
+            this.maxTokensFunction = ensureNotNull(builder.maxTokensFunction, "maxTokensFunction");
+            this.tokenCountEstimator = ensureNotNull(builder.tokenCountEstimator, "tokenCountEstimator");
+            this.maxTokensToSummarizeFunction = builder.maxTokensToSummarizeFunction;
+            this.maxMessagesFunction = null;
+            this.maxMessagesToSummarizeFunction = null;
+
+            // Validate token-based configuration once on build
+            int maxTokens = maxTokensFunction.apply(id);
+            ensureGreaterThanZero(maxTokens, "maxTokens");
+        }
     }
 
     @Override
@@ -113,14 +153,22 @@ public class SummarizingChatMemory implements ChatMemory {
         }
 
         messages.add(message);
-        checkAndSummarizeMessages(messages);
+        if (triggerMode == TriggerMode.MESSAGE_COUNT) {
+            checkAndSummarizeMessagesByCount(messages);
+        } else {
+            checkAndSummarizeMessagesByTokens(messages);
+        }
         store.updateMessages(id, messages);
     }
 
     @Override
     public List<ChatMessage> messages() {
         List<ChatMessage> messages = new LinkedList<>(store.getMessages(id));
-        checkAndSummarizeMessages(messages);
+        if (triggerMode == TriggerMode.MESSAGE_COUNT) {
+            checkAndSummarizeMessagesByCount(messages);
+        } else {
+            checkAndSummarizeMessagesByTokens(messages);
+        }
         return messages;
     }
 
@@ -130,9 +178,9 @@ public class SummarizingChatMemory implements ChatMemory {
     }
 
     /**
-     * Check message list size and trigger summarization if it exceeds maxMessages.
+     * Check message list size and trigger summarization if it exceeds maxMessages (message-count mode).
      */
-    private void checkAndSummarizeMessages(List<ChatMessage> messages) {
+    private void checkAndSummarizeMessagesByCount(List<ChatMessage> messages) {
         int maxMessages = maxMessagesFunction.apply(id);
         int maxMessagesToSummarize = maxMessagesToSummarizeFunction.apply(id);
 
@@ -162,24 +210,94 @@ public class SummarizingChatMemory implements ChatMemory {
     }
 
     /**
+     * Check message list token count and trigger summarization if it exceeds maxTokens (token-based mode).
+     */
+    private void checkAndSummarizeMessagesByTokens(List<ChatMessage> messages) {
+        int maxTokens = maxTokensFunction.apply(id);
+        ensureGreaterThanZero(maxTokens, "maxTokens");
+
+        if (messages.isEmpty()) {
+            return;
+        }
+
+        int currentTokenCount = tokenCountEstimator.estimateTokenCountInMessages(messages);
+        if (currentTokenCount <= maxTokens) {
+            return;
+        }
+
+        // Determine how many tokens worth of messages to summarize
+        int targetTokensToSummarize;
+        if (maxTokensToSummarizeFunction != null) {
+            targetTokensToSummarize = maxTokensToSummarizeFunction.apply(id);
+        } else {
+            // Default: summarize enough to get back under the limit with some buffer
+            targetTokensToSummarize = currentTokenCount - (maxTokens / 2);
+        }
+
+        List<ChatMessage> removedMessages = new ArrayList<>();
+        int removedTokenCount = 0;
+
+        while (!messages.isEmpty() && removedTokenCount < targetTokensToSummarize) {
+            int evictIndex = (messages.get(0) instanceof SystemMessage) ? 1 : 0;
+
+            // Don't evict if only system message remains
+            if (evictIndex >= messages.size()) {
+                break;
+            }
+
+            ChatMessage evicted = messages.remove(evictIndex);
+            removedMessages.add(evicted);
+            removedTokenCount += tokenCountEstimator.estimateTokenCountInMessage(evicted);
+
+            // Remove tool execution results associated with the evicted AI message
+            if (evicted instanceof AiMessage aiMessage && aiMessage.hasToolExecutionRequests()) {
+                while (messages.size() > evictIndex && messages.get(evictIndex) instanceof ToolExecutionResultMessage) {
+                    ChatMessage orphan = messages.remove(evictIndex);
+                    removedMessages.add(orphan);
+                    removedTokenCount += tokenCountEstimator.estimateTokenCountInMessage(orphan);
+                }
+            }
+        }
+
+        if (!removedMessages.isEmpty()) {
+            int insertIndex = (!messages.isEmpty() && messages.get(0) instanceof SystemMessage) ? 1 : 0;
+            messages.add(insertIndex, this.generateSummaryFunction.apply(removedMessages));
+        }
+
+        // Recursively check if we're still over limit after adding summary
+        currentTokenCount = tokenCountEstimator.estimateTokenCountInMessages(messages);
+        if (currentTokenCount > maxTokens && messages.size() > 1) {
+            checkAndSummarizeMessagesByTokens(messages);
+        }
+    }
+
+    /**
      * Builder for {@link SummarizingChatMemory}.
      */
     public static class Builder {
         private static final String DEFAULT_SYSTEM_PROMPT =
                 """
                         You are a conversation summarization assistant. Please read the entire history of interactions between the user and the AI, and generate a concise summary.
-    
+
                         Requirements for the summary:
                         - Keep the length between 50 and 500 characters.
                         - Accurately capture the main topics, goals, and conclusions discussed.
                         - Exclude any irrelevant dialogue or system messages.
                         - Maintain a neutral and objective tone, without adding unexpressed or speculative information.
                         - If the conversation covers multiple topics, organize the summary clearly by theme.
-                        - Do not include introductions such as “Here is the summary” or “The user said.” Output only the summary text itself.
+                        - Do not include introductions such as "Here is the summary" or "The user said." Output only the summary text itself.
                         """;
         private Object id = ChatMemoryService.DEFAULT;
+
+        // Message-count mode fields
         private Function<Object, Integer> maxMessagesFunction;
         private Function<Object, Integer> maxMessagesToSummarizeFunction;
+
+        // Token-based mode fields
+        private Function<Object, Integer> maxTokensFunction;
+        private Function<Object, Integer> maxTokensToSummarizeFunction;
+        private TokenCountEstimator tokenCountEstimator;
+
         private Function<List<ChatMessage>, UserMessage> generateSummaryFunction;
         private ChatMemoryStore store;
 
@@ -194,25 +312,36 @@ public class SummarizingChatMemory implements ChatMemory {
         }
 
         /**
-         * Sets a dynamic function to determine the maximum number of messages to retain.
+         * Sets a dynamic function to determine the maximum number of messages to retain (message-count mode).
          * <p>
          * The function is evaluated to decide how many messages should be kept.
-         * If the capacity is exceeded, the oldest messages will be evicted.
+         * If the capacity is exceeded, the oldest messages will be evicted and summarized.
+         * <p>
+         * This is mutually exclusive with token-based mode configuration ({@link #maxTokens}).
          *
          * @param func a function that determines the maximum number of messages to retain
          * @return the builder instance
+         * @throws IllegalStateException if token-based mode is already configured
          */
         public Builder dynamicMaxMessages(Function<Object, Integer> func) {
+            ensureTokenModeNotConfigured();
             this.maxMessagesFunction = func;
             return this;
         }
 
         /**
+         * Sets the maximum number of messages to retain before triggering summarization (message-count mode).
+         * <p>
+         * If there isn't enough space for a new message, the oldest messages are evicted and summarized.
+         * <p>
+         * This is mutually exclusive with token-based mode configuration ({@link #maxTokens}).
+         *
          * @param maxMessages The maximum number of messages to retain.
-         *                    If there isn't enough space for a new message, the oldest one is evicted.
          * @return builder
+         * @throws IllegalStateException if token-based mode is already configured
          */
         public Builder maxMessages(Integer maxMessages) {
+            ensureTokenModeNotConfigured();
             this.maxMessagesFunction = (id) -> maxMessages;
             return this;
         }
@@ -251,6 +380,94 @@ public class SummarizingChatMemory implements ChatMemory {
          */
         public Builder maxMessagesToSummarize(Integer maxMessagesToSummarize) {
             this.maxMessagesToSummarizeFunction = (id) -> maxMessagesToSummarize;
+            return this;
+        }
+
+        // ============ TOKEN-BASED MODE CONFIGURATION ============
+
+        /**
+         * Sets the maximum number of tokens to retain before triggering summarization (token-based mode).
+         * <p>
+         * This is mutually exclusive with message-count mode configuration ({@link #maxMessages}).
+         * A {@link TokenCountEstimator} must also be configured via {@link #tokenCountEstimator}
+         * or by using {@link #maxTokens(Integer, TokenCountEstimator)}.
+         *
+         * @param maxTokens the maximum number of tokens before summarization is triggered
+         * @return the builder instance
+         * @throws IllegalStateException if message-count mode is already configured
+         */
+        public Builder maxTokens(Integer maxTokens) {
+            ensureMessageModeNotConfigured();
+            this.maxTokensFunction = (id) -> maxTokens;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of tokens and the token count estimator (token-based mode).
+         * <p>
+         * This is a convenience method combining {@link #maxTokens(Integer)} and
+         * {@link #tokenCountEstimator(TokenCountEstimator)}.
+         *
+         * @param maxTokens the maximum number of tokens before summarization is triggered
+         * @param tokenCountEstimator the estimator used to count tokens in messages
+         * @return the builder instance
+         * @throws IllegalStateException if message-count mode is already configured
+         */
+        public Builder maxTokens(Integer maxTokens, TokenCountEstimator tokenCountEstimator) {
+            return maxTokens(maxTokens).tokenCountEstimator(tokenCountEstimator);
+        }
+
+        /**
+         * Sets a dynamic function to determine the maximum number of tokens to retain (token-based mode).
+         * <p>
+         * This is mutually exclusive with message-count mode configuration.
+         *
+         * @param func a function that determines the maximum number of tokens to retain
+         * @return the builder instance
+         * @throws IllegalStateException if message-count mode is already configured
+         */
+        public Builder dynamicMaxTokens(Function<Object, Integer> func) {
+            ensureMessageModeNotConfigured();
+            this.maxTokensFunction = func;
+            return this;
+        }
+
+        /**
+         * Sets the token count estimator used for token-based mode.
+         * <p>
+         * This is required when using token-based mode.
+         *
+         * @param tokenCountEstimator the estimator used to count tokens in messages
+         * @return the builder instance
+         */
+        public Builder tokenCountEstimator(TokenCountEstimator tokenCountEstimator) {
+            this.tokenCountEstimator = tokenCountEstimator;
+            return this;
+        }
+
+        /**
+         * Sets a static number of tokens worth of messages to remove and summarize
+         * when the total token count exceeds the configured {@code maxTokens}.
+         * <p>
+         * If not set, a default strategy will be used that aims to reduce the token
+         * count to half of {@code maxTokens}.
+         *
+         * @param maxTokensToSummarize the target number of tokens worth of messages to summarize
+         * @return the builder instance
+         */
+        public Builder maxTokensToSummarize(Integer maxTokensToSummarize) {
+            this.maxTokensToSummarizeFunction = (id) -> maxTokensToSummarize;
+            return this;
+        }
+
+        /**
+         * Sets a dynamic function to determine how many tokens worth of messages to summarize.
+         *
+         * @param func a function that returns the number of tokens worth of messages to summarize
+         * @return the builder instance
+         */
+        public Builder dynamicMaxTokensToSummarize(Function<Object, Integer> func) {
+            this.maxTokensToSummarizeFunction = func;
             return this;
         }
 
@@ -311,7 +528,56 @@ public class SummarizingChatMemory implements ChatMemory {
             return store != null ? store : new SingleSlotChatMemoryStore(id);
         }
 
+        private boolean isMessageModeConfigured() {
+            return maxMessagesFunction != null;
+        }
+
+        private boolean isTokenModeConfigured() {
+            return maxTokensFunction != null;
+        }
+
+        private void ensureMessageModeNotConfigured() {
+            if (isMessageModeConfigured()) {
+                throw new IllegalStateException(
+                        "Cannot configure token-based mode when message-count mode (maxMessages) is already set. "
+                                + "These modes are mutually exclusive.");
+            }
+        }
+
+        private void ensureTokenModeNotConfigured() {
+            if (isTokenModeConfigured()) {
+                throw new IllegalStateException(
+                        "Cannot configure message-count mode when token-based mode (maxTokens) is already set. "
+                                + "These modes are mutually exclusive.");
+            }
+        }
+
+        TriggerMode determineTriggerMode() {
+            boolean messageMode = isMessageModeConfigured();
+            boolean tokenMode = isTokenModeConfigured();
+
+            if (!messageMode && !tokenMode) {
+                throw new IllegalStateException(
+                        "Either message-count mode (maxMessages) or token-based mode (maxTokens) must be configured.");
+            }
+
+            if (messageMode && tokenMode) {
+                throw new IllegalStateException(
+                        "Cannot configure both message-count mode (maxMessages) and token-based mode (maxTokens). "
+                                + "These modes are mutually exclusive.");
+            }
+
+            if (tokenMode && tokenCountEstimator == null) {
+                throw new IllegalStateException("Token-based mode requires a TokenCountEstimator. "
+                        + "Use tokenCountEstimator() or maxTokens(Integer, TokenCountEstimator).");
+            }
+
+            return tokenMode ? TriggerMode.TOKEN_BASED : TriggerMode.MESSAGE_COUNT;
+        }
+
         public SummarizingChatMemory build() {
+            ensureNotNull(generateSummaryFunction, "generateSummaryFunction");
+            determineTriggerMode(); // Validates configuration
             return new SummarizingChatMemory(this);
         }
     }
